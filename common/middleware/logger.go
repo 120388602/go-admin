@@ -4,9 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"fmt"
+	"go-admin/app/admin/service/dto"
 	"go-admin/common"
-	gaConfig "go-admin/config"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"github.com/go-admin-team/go-admin-core/sdk"
 	"github.com/go-admin-team/go-admin-core/sdk/api"
 	"github.com/go-admin-team/go-admin-core/sdk/config"
-	"github.com/go-admin-team/go-admin-core/sdk/pkg"
 	"github.com/go-admin-team/go-admin-core/sdk/pkg/jwtauth/user"
 
 	"go-admin/common/global"
@@ -102,24 +100,27 @@ func LoggerToFile() gin.HandlerFunc {
 
 // SetDBOperLog 写入操作日志表 fixme 该方法后续即将弃用
 func SetDBOperLog(c *gin.Context, clientIP string, statusCode int, reqUri string, reqMethod string, latencyTime time.Duration, body string, result string, status int) {
+
 	log := api.GetRequestLogger(c)
 	l := make(map[string]interface{})
 	l["_fullPath"] = c.FullPath()
 	l["operUrl"] = reqUri
 	l["operIp"] = clientIP
-	fmt.Println("gaConfig.ExtConfig.AMap.Key", gaConfig.ExtConfig.AMap.Key)
-	l["operLocation"] = pkg.GetLocation(clientIP, gaConfig.ExtConfig.AMap.Key)
+	l["operLocation"] = "" // pkg.GetLocation(clientIP, gaConfig.ExtConfig.AMap.Key)
 	l["operName"] = user.GetUserName(c)
-	l["requestMethod"] = c.Request.Method
+	l["requestMethod"] = reqMethod
 	l["operParam"] = body
 	l["operTime"] = time.Now()
 	l["jsonResult"] = result
 	l["latencyTime"] = latencyTime.String()
 	l["statusCode"] = statusCode
+	l["userAgent"] = c.Request.UserAgent()
+	l["createBy"] = user.GetUserId(c)
+	l["updateBy"] = user.GetUserId(c)
 	if status == http.StatusOK {
-		l["status"] = "2"
+		l["status"] = dto.OperaStatusEnabel
 	} else {
-		l["status"] = "1"
+		l["status"] = dto.OperaStatusDisable
 	}
 	q := sdk.Runtime.GetMemoryQueue(c.Request.Host)
 	message, err := sdk.Runtime.GetStreamMessage("", global.OperateLog, l)

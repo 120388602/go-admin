@@ -1,26 +1,18 @@
-FROM golang:alpine as builder
-
-MAINTAINER lwnmengjing
-
-ENV GOPROXY https://goproxy.cn/
-
-WORKDIR /go/release
-#RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
-RUN apk update && apk add tzdata
-
-COPY go.mod ./go.mod
-RUN go mod tidy
-COPY . .
-RUN pwd && ls
-
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -a -installsuffix cgo -o go-admin .
-
 FROM alpine
 
-COPY --from=builder /go/release/go-admin /
+# ENV GOPROXY https://goproxy.cn/
 
-COPY --from=builder /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.ustc.edu.cn/g' /etc/apk/repositories
 
+RUN apk update --no-cache
+RUN apk add --update gcc g++ libc6-compat
+RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache tzdata
+ENV TZ Asia/Shanghai
+
+COPY ./main /main
+COPY ./config/settings.demo.yml /config/settings.yml
+COPY ./go-admin-db.db /go-admin-db.db
 EXPOSE 8000
-
-CMD ["/go-admin","server","-c", "/config/settings.yml"]
+RUN  chmod +x /main
+CMD ["/main","server","-c", "/config/settings.yml"]

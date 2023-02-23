@@ -1,8 +1,12 @@
 package service
 
 import (
-	"errors"
+	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/go-admin-team/go-admin-core/sdk/pkg"
+	"github.com/pkg/errors"
 	"gorm.io/gorm"
 
 	"go-admin/app/admin/models"
@@ -86,21 +90,46 @@ func (e *SysMenu) Insert(c *dto.SysMenuInsertReq) *SysMenu {
 	var err error
 	var data models.SysMenu
 	c.Generate(&data)
-	err = e.Orm.Create(&data).Error
+	tx := e.Orm.Debug().Begin()
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+	err = tx.Where("id in ?", c.Apis).Find(&data.SysApi).Error
 	if err != nil {
+		tx.Rollback()
+		e.Log.Errorf("db error:%s", err)
+		_ = e.AddError(err)
+	}
+	err = tx.Create(&data).Error
+	if err != nil {
+		tx.Rollback()
 		e.Log.Errorf("db error:%s", err)
 		_ = e.AddError(err)
 	}
 	c.MenuId = data.MenuId
+	err = e.initPaths(tx, &data)
+	if err != nil {
+		tx.Rollback()
+		e.Log.Errorf("db error:%s", err)
+		_ = e.AddError(err)
+	}
+	tx.Commit()
 	return e
 }
 
-func (e *SysMenu) initPaths(menu *models.SysMenu) error {
+func (e *SysMenu) initPaths(tx *gorm.DB, menu *models.SysMenu) error {
 	var err error
 	var data models.SysMenu
 	parentMenu := new(models.SysMenu)
 	if menu.ParentId != 0 {
-		e.Orm.Model(&data).First(parentMenu, menu.ParentId)
+		err = tx.Model(&data).First(parentMenu, menu.ParentId).Error
+		if err != nil {
+			return err
+		}
 		if parentMenu.Paths == "" {
 			err = errors.New("父级paths异常，请尝试对当前节点父级菜单进行更新操作！")
 			return err
@@ -109,7 +138,7 @@ func (e *SysMenu) initPaths(menu *models.SysMenu) error {
 	} else {
 		menu.Paths = "/0/" + pkg.IntToString(menu.MenuId)
 	}
-	e.Orm.Model(&data).Where("menu_id = ?", menu.MenuId).Update("paths", menu.Paths)
+	err = tx.Model(&data).Where("menu_id = ?", menu.MenuId).Update("paths", menu.Paths).Error
 	return err
 }
 
@@ -127,6 +156,7 @@ func (e *SysMenu) Update(c *dto.SysMenuUpdateReq) *SysMenu {
 	var alist = make([]models.SysApi, 0)
 	var model = models.SysMenu{}
 	tx.Preload("SysApi").First(&model, c.GetId())
+	oldPath := model.Paths
 	tx.Where("id in ?", c.Apis).Find(&alist)
 	err = tx.Model(&model).Association("SysApi").Delete(model.SysApi)
 	if err != nil {
@@ -137,7 +167,7 @@ func (e *SysMenu) Update(c *dto.SysMenuUpdateReq) *SysMenu {
 	c.Generate(&model)
 	model.SysApi = alist
 	db := tx.Model(&model).Session(&gorm.Session{FullSaveAssociations: true}).Debug().Save(&model)
-	if db.Error != nil {
+	if err = db.Error; err != nil {
 		e.Log.Errorf("db error:%s", err)
 		_ = e.AddError(err)
 		return e
@@ -145,6 +175,12 @@ func (e *SysMenu) Update(c *dto.SysMenuUpdateReq) *SysMenu {
 	if db.RowsAffected == 0 {
 		_ = e.AddError(errors.New("无权更新该数据"))
 		return e
+	}
+	var menuList []models.SysMenu
+	tx.Where("paths like ?", oldPath+"%").Find(&menuList)
+	for _, v := range menuList {
+		v.Paths = strings.Replace(v.Paths, oldPath, model.Paths, 1)
+		tx.Model(&v).Update("paths", v.Paths)
 	}
 	return e
 }
@@ -155,7 +191,7 @@ func (e *SysMenu) Remove(d *dto.SysMenuDeleteReq) *SysMenu {
 	var data models.SysMenu
 
 	db := e.Orm.Model(&data).Delete(&data, d.Ids)
-	if db.Error != nil {
+	if err = db.Error; err != nil {
 		err = db.Error
 		e.Log.Errorf("Delete error: %s", err)
 		_ = e.AddError(err)
@@ -306,6 +342,40 @@ func menuCall(menuList *[]models.SysMenu, menu models.SysMenu) models.SysMenu {
 	return menu
 }
 
+func menuDistinct(menuList []models.SysMenu) (result []models.SysMenu) {
+	distinctMap := make(map[int]struct{}, len(menuList))
+	for _, menu := range menuList {
+		if _, ok := distinctMap[menu.MenuId]; !ok {
+			distinctMap[menu.MenuId] = struct{}{}
+			result = append(result, menu)
+		}
+	}
+	return result
+}
+
+func recursiveSetMenu(orm *gorm.DB, mIds []int, menus *[]models.SysMenu) error {
+	if len(mIds) == 0 || menus == nil {
+		return nil
+	}
+	var subMenus []models.SysMenu
+	err := orm.Where(fmt.Sprintf(" menu_type in ('%s', '%s', '%s') and menu_id in ?",
+		cModels.Directory, cModels.Menu, cModels.Button), mIds).Order("sort").Find(&subMenus).Error
+	if err != nil {
+		return err
+	}
+
+	subIds := make([]int, 0)
+	for _, menu := range subMenus {
+		if menu.ParentId != 0 {
+			subIds = append(subIds, menu.ParentId)
+		}
+		if menu.MenuType != cModels.Button {
+			*menus = append(*menus, menu)
+		}
+	}
+	return recursiveSetMenu(orm, subIds, menus)
+}
+
 // SetMenuRole 获取左侧菜单树使用
 func (e *SysMenu) SetMenuRole(roleName string) (m []models.SysMenu, err error) {
 	menus, err := e.getByRoleName(roleName)
@@ -321,55 +391,33 @@ func (e *SysMenu) SetMenuRole(roleName string) (m []models.SysMenu, err error) {
 }
 
 func (e *SysMenu) getByRoleName(roleName string) ([]models.SysMenu, error) {
-	var MenuList []models.SysMenu
 	var role models.SysRole
 	var err error
+	data := make([]models.SysMenu, 0)
 
 	if roleName == "admin" {
-		var data []models.SysMenu
-		err = e.Orm.Where(" menu_type in ('M','C')").Order("sort").Find(&data).Error
-		MenuList = data
+		err = e.Orm.Where(" menu_type in ('M','C') and deleted_at is null").
+			Order("sort").
+			Find(&data).
+			Error
+		err = errors.WithStack(err)
 	} else {
 		role.RoleKey = roleName
-		buttons := make([]models.SysMenu,0)
-		err = e.Orm.Debug().Model(&role).Where("role_key = ? ", roleName).Preload("SysMenu", func(db *gorm.DB) *gorm.DB {
-			return db.Where(" menu_type in ('F')").Order("sort")
-		}).Find(&role).Error
+		err = e.Orm.Model(&role).Where("role_key = ? ", roleName).Preload("SysMenu").First(&role).Error
+
 		if role.SysMenu != nil {
-			buttons = *role.SysMenu
-		}
-		mIds := make([]int, 0)
-		for _, menu := range buttons {
-			if menu.ParentId != 0 {
-				mIds = append(mIds, menu.ParentId)
+			mIds := make([]int, 0)
+			for _, menu := range *role.SysMenu {
+				mIds = append(mIds, menu.MenuId)
 			}
-		}
-		var dataC []models.SysMenu
-		err = e.Orm.Where(" menu_type in ('C') and menu_id in ?", mIds).Order("sort").Find(&dataC).Error
-		if err != nil {
-			return nil, err
-		}
-		for _, datum := range dataC {
-			MenuList = append(MenuList, datum)
-		}
-		cIds := make([]int, 0)
-		for _, menu := range MenuList {
-			if menu.ParentId != 0 {
-				cIds = append(cIds, menu.ParentId)
+			if err := recursiveSetMenu(e.Orm, mIds, &data); err != nil {
+				return nil, err
 			}
-		}
-		var dataM []models.SysMenu
-		err = e.Orm.Where(" menu_type in ('M') and menu_id in ?", cIds).Order("sort").Find(&dataM).Error
-		if err != nil {
-			return nil, err
-		}
-		for _, datum := range dataM {
-			MenuList = append(MenuList, datum)
+
+			data = menuDistinct(data)
 		}
 	}
 
-	if err != nil {
-		e.Log.Errorf("db error:%s", err)
-	}
-	return MenuList, err
+	sort.Sort(models.SysMenuSlice(data))
+	return data, err
 }

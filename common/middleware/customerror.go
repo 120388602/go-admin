@@ -2,8 +2,8 @@ package middleware
 
 import (
 	"fmt"
-	"go-admin/common"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -34,14 +34,24 @@ func CustomError(c *gin.Context) {
 						c.Request.URL,
 						statusCode,
 						c.Request.RequestURI,
-						common.GetClientIP(c),
+						c.ClientIP(),
 						p[2],
 					)
 					c.JSON(http.StatusOK, gin.H{
 						"code": statusCode,
 						"msg":  p[2],
 					})
+				} else {
+					c.JSON(http.StatusOK, gin.H{
+						"code": 500,
+						"msg":  errStr,
+					})
 				}
+			case runtime.Error:
+				c.JSON(http.StatusOK, gin.H{
+					"code": 500,
+					"msg":  errStr.Error(),
+				})
 			default:
 				panic(err)
 			}

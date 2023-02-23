@@ -1,13 +1,14 @@
 package version
 
 import (
+	"github.com/go-admin-team/go-admin-core/sdk/config"
 	"runtime"
-
-	"gorm.io/gorm"
 
 	"go-admin/cmd/migrate/migration"
 	"go-admin/cmd/migrate/migration/models"
 	common "go-admin/common/models"
+
+	"gorm.io/gorm"
 )
 
 func init() {
@@ -17,8 +18,10 @@ func init() {
 
 func _1599190683659Tables(db *gorm.DB, version string) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		err := tx.Debug().Migrator().AutoMigrate(
-			new(models.CasbinRule),
+		if config.DatabaseConfig.Driver == "mysql" {
+			tx = tx.Set("gorm:table_options", "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
+		}
+		err := tx.Migrator().AutoMigrate(
 			new(models.SysDept),
 			new(models.SysConfig),
 			new(models.SysTables),
@@ -41,7 +44,7 @@ func _1599190683659Tables(db *gorm.DB, version string) error {
 			return err
 		}
 		if err := models.InitDb(tx); err != nil {
-
+			return err
 		}
 		return tx.Create(&common.Migration{
 			Version: version,
